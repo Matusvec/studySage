@@ -57,6 +57,16 @@ class PDFParser:
         if self.doc:
             self.doc.close()
 
+    def _normalize_page_range(self, start_page: int, end_page: int) -> tuple[int, int]:
+        """Normalize and clamp a page range so start <= end and within bounds."""
+        if self.total_pages <= 0:
+            return 0, -1
+        start = min(start_page, end_page)
+        end = max(start_page, end_page)
+        start = max(0, start)
+        end = min(end, self.total_pages - 1)
+        return start, end
+
     def get_toc(self) -> list[dict]:
         """
         Extract table of contents from PDF metadata.
@@ -120,8 +130,9 @@ class PDFParser:
         Uses pymupdf_layout for structured markdown if available,
         falls back to plain text extraction otherwise.
         """
-        start_page = max(0, start_page)
-        end_page = min(end_page, self.total_pages - 1)
+        start_page, end_page = self._normalize_page_range(start_page, end_page)
+        if end_page < start_page:
+            return ""
 
         if _LAYOUT_AVAILABLE:
             try:
@@ -151,8 +162,9 @@ class PDFParser:
         Always uses basic PyMuPDF extraction. Useful for command extraction
         and other pattern-matching tasks.
         """
-        start_page = max(0, start_page)
-        end_page = min(end_page, self.total_pages - 1)
+        start_page, end_page = self._normalize_page_range(start_page, end_page)
+        if end_page < start_page:
+            return ""
         text = ""
         for page_num in range(start_page, end_page + 1):
             page = self.doc[page_num]
@@ -170,8 +182,9 @@ class PDFParser:
            it's likely code/commands (works even with obfuscated font names)
         """
         blocks = []
-        start_page = max(0, start_page)
-        end_page = min(end_page, self.total_pages - 1)
+        start_page, end_page = self._normalize_page_range(start_page, end_page)
+        if end_page < start_page:
+            return []
 
         # First pass: collect all spans to determine font usage statistics
         from collections import Counter
@@ -335,8 +348,9 @@ class PDFParser:
         Returns:
             List of dicts: {bytes, page, width, height, label, mime_type}
         """
-        start_page = max(0, start_page)
-        end_page = min(end_page, self.total_pages - 1)
+        start_page, end_page = self._normalize_page_range(start_page, end_page)
+        if end_page < start_page:
+            return []
 
         images = []
         seen_xrefs = set()
@@ -408,8 +422,9 @@ class PDFParser:
         Returns:
             List of dicts: {bytes, page, label, text, mime_type, type}
         """
-        start_page = max(0, start_page)
-        end_page = min(end_page, self.total_pages - 1)
+        start_page, end_page = self._normalize_page_range(start_page, end_page)
+        if end_page < start_page:
+            return []
 
         tables = []
 
@@ -494,8 +509,9 @@ class PDFParser:
         Returns list of dicts:
         [{"title": "Section Title", "text": "section body text...", "page": 5}, ...]
         """
-        start_page = max(0, start_page)
-        end_page = min(end_page, self.total_pages - 1)
+        start_page, end_page = self._normalize_page_range(start_page, end_page)
+        if end_page < start_page:
+            return [{"title": "Full Chapter", "text": "", "page": start_page}]
 
         # Try layout-enhanced section detection first
         if _LAYOUT_AVAILABLE:
@@ -608,8 +624,9 @@ class PDFParser:
         Returns list of dicts:
         [{"title": "Section Title", "text": "section body text...", "page": 5}, ...]
         """
-        start_page = max(0, start_page)
-        end_page = min(end_page, self.total_pages - 1)
+        start_page, end_page = self._normalize_page_range(start_page, end_page)
+        if end_page < start_page:
+            return [{"title": "Full Chapter", "text": "", "page": start_page}]
 
         # Phase 1: Collect all lines with font info
         lines = []
