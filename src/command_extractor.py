@@ -147,11 +147,176 @@ class CommandExtractor:
         "crontab", "at", "systemctl", "service", "journalctl",
     }
 
+    # Short one-liner descriptions for quick view
+    COMMAND_DESCRIPTIONS: dict[str, str] = {
+        # Navigation & file basics
+        "ls": "List directory contents",
+        "cd": "Change working directory",
+        "pwd": "Print current directory path",
+        "mkdir": "Create directories",
+        "rmdir": "Remove empty directories",
+        "rm": "Delete files or directories",
+        "cp": "Copy files or directories",
+        "mv": "Move or rename files",
+        "touch": "Create empty file or update timestamp",
+        # Viewing & searching
+        "cat": "Display file contents",
+        "less": "Page through file contents",
+        "more": "View file one screen at a time",
+        "head": "Show first lines of a file",
+        "tail": "Show last lines of a file",
+        "grep": "Search text using patterns",
+        "find": "Search for files in directory tree",
+        "locate": "Find files by name (indexed)",
+        # Info & help
+        "which": "Show full path of a command",
+        "whereis": "Locate binary, source, and man page",
+        "man": "Display manual pages",
+        "info": "Read GNU info documentation",
+        "help": "Show shell built-in help",
+        "type": "Show how a command name is interpreted",
+        "alias": "Create command shortcuts",
+        # I/O & variables
+        "echo": "Print text to stdout",
+        "printf": "Format and print text",
+        "read": "Read input into a variable",
+        "export": "Set environment variables",
+        "set": "Set or list shell options/variables",
+        "unset": "Remove a variable or function",
+        "env": "Run command in modified environment",
+        # Permissions & users
+        "chmod": "Change file permissions",
+        "chown": "Change file owner",
+        "chgrp": "Change file group",
+        "umask": "Set default permission mask",
+        "su": "Switch user identity",
+        "sudo": "Run command as superuser",
+        "passwd": "Change user password",
+        # Processes
+        "ps": "List running processes",
+        "top": "Live process monitor",
+        "htop": "Interactive process viewer",
+        "kill": "Send signal to a process",
+        "killall": "Kill processes by name",
+        "jobs": "List background jobs",
+        "bg": "Resume job in background",
+        "fg": "Bring job to foreground",
+        "nohup": "Run command immune to hangups",
+        "nice": "Run with modified priority",
+        "renice": "Change priority of running process",
+        "wait": "Wait for background jobs to finish",
+        # Archives & compression
+        "tar": "Archive files (tape archive)",
+        "gzip": "Compress files (gz)",
+        "gunzip": "Decompress gz files",
+        "bzip2": "Compress files (bz2)",
+        "zip": "Package and compress files",
+        "unzip": "Extract zip archives",
+        "xz": "Compress files (xz)",
+        # Networking & transfer
+        "wget": "Download files from the web",
+        "curl": "Transfer data via URLs",
+        "ssh": "Secure remote shell",
+        "scp": "Secure copy over SSH",
+        "rsync": "Sync files locally or remotely",
+        "ftp": "File transfer protocol client",
+        "sftp": "Secure file transfer",
+        # Package managers
+        "apt": "Debian/Ubuntu package manager",
+        "apt-get": "APT package handling utility",
+        "yum": "RHEL/CentOS package manager",
+        "dnf": "Fedora package manager",
+        "pacman": "Arch Linux package manager",
+        "snap": "Snap package manager",
+        "flatpak": "Flatpak app manager",
+        "pip": "Python package installer",
+        "npm": "Node.js package manager",
+        "gem": "Ruby package manager",
+        # Text processing
+        "sed": "Stream editor for text transforms",
+        "awk": "Pattern scanning and processing",
+        "sort": "Sort lines of text",
+        "uniq": "Filter duplicate lines",
+        "wc": "Count lines, words, and bytes",
+        "cut": "Extract columns from text",
+        "paste": "Merge lines side by side",
+        "tr": "Translate or delete characters",
+        "diff": "Compare files line by line",
+        "comm": "Compare two sorted files",
+        "patch": "Apply a diff patch",
+        "tee": "Read stdin, write to stdout and files",
+        "xargs": "Build commands from stdin",
+        # System info
+        "date": "Display or set system date/time",
+        "cal": "Show a calendar",
+        "uptime": "Show system uptime and load",
+        "free": "Display memory usage",
+        "df": "Show disk space usage",
+        "du": "Estimate file/dir space usage",
+        "mount": "Mount a filesystem",
+        "umount": "Unmount a filesystem",
+        # Network diagnostics
+        "ifconfig": "Configure network interfaces",
+        "ip": "Show/manage routing and devices",
+        "ping": "Test network connectivity",
+        "netstat": "Show network connections",
+        "ss": "Socket statistics",
+        "traceroute": "Trace packet route to host",
+        "dig": "DNS lookup utility",
+        "nslookup": "Query DNS servers",
+        "host": "DNS lookup (simple)",
+        # Dev tools
+        "git": "Version control system",
+        "docker": "Container management",
+        "make": "Build automation tool",
+        "gcc": "GNU C/C++ compiler",
+        "python": "Python interpreter",
+        "bash": "Bourne Again Shell",
+        "sh": "POSIX shell",
+        "zsh": "Z shell",
+        # Editors
+        "vim": "Vi Improved text editor",
+        "vi": "Visual text editor",
+        "nano": "Simple terminal text editor",
+        "emacs": "Extensible text editor",
+        "ed": "Line-oriented text editor",
+        # Shell & history
+        "history": "Show command history",
+        "fc": "Edit and re-run previous commands",
+        "source": "Execute commands from a file",
+        "exec": "Replace shell with a command",
+        "eval": "Evaluate and execute arguments",
+        # File utilities
+        "test": "Evaluate conditional expression",
+        "expr": "Evaluate arithmetic expression",
+        "bc": "Arbitrary precision calculator",
+        "file": "Determine file type",
+        "stat": "Display file status details",
+        "ln": "Create hard or symbolic links",
+        "readlink": "Resolve symlink target",
+        # Terminal
+        "tput": "Control terminal capabilities",
+        "clear": "Clear terminal screen",
+        "reset": "Reset terminal to sane state",
+        "stty": "Change terminal settings",
+        # Scheduling & services
+        "crontab": "Schedule recurring tasks",
+        "at": "Schedule a one-time task",
+        "systemctl": "Manage systemd services",
+        "service": "Run init.d service scripts",
+        "journalctl": "View systemd journal logs",
+    }
+
     # Common flags/options patterns
     FLAG_PATTERN = re.compile(r'(?<!\w)-{1,2}[a-zA-Z][\w-]*')
 
     def __init__(self):
         pass
+
+    @classmethod
+    def get_description(cls, command: str) -> str:
+        """Get a short one-liner description for a command."""
+        return cls.COMMAND_DESCRIPTIONS.get(command, "")
 
     def extract_from_text(self, text: str) -> list[ExtractedCommand]:
         """
@@ -367,14 +532,14 @@ class CommandExtractor:
         )
 
     def format_commands_table(self, commands: list[ExtractedCommand]) -> str:
-        """Format extracted commands as a Markdown table."""
+        """Format extracted commands as a compact Markdown table with short descriptions."""
         if not commands:
             return "_No commands detected in this section._"
 
-        lines = ["| Command | Flags | Context |", "|---------|-------|---------|"]
+        lines = ["| Command | Flags | Description |", "|---------|-------|-------------|"]
         for cmd in commands:
-            flags = ", ".join(cmd.flags) if cmd.flags else "—"
-            context = cmd.context[:80].replace("|", "\\|").replace("\n", " ") if cmd.context else "—"
-            lines.append(f"| `{cmd.command}` | `{flags}` | {context} |")
+            flags = ", ".join(cmd.flags[:5]) if cmd.flags else "—"
+            desc = self.get_description(cmd.command) or "—"
+            lines.append(f"| `{cmd.command}` | `{flags}` | {desc} |")
 
         return "\n".join(lines)

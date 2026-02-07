@@ -1,5 +1,7 @@
 streamlit>=1.40.0
-PyMuPDF>=1.25.0
+PyMuPDF>=1.26.0
+pymupdf-layout>=1.26.0
+pymupdf4llm>=0.2.9
 google-genai>=1.0.0
 python-dotenv>=1.0.0
 fpdf2>=2.8.0

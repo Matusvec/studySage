@@ -1133,15 +1133,14 @@ with tab_extract:
                 f"{icon} {ch_title} — {len(cmds)} commands {label}",
                 expanded=is_current,
             ):
-                # Display as a compact grid of command badges
-                cmd_cols = st.columns(min(len(cmds), 5) or 1)
-                for c_idx, cmd_name in enumerate(cmds):
-                    col = cmd_cols[c_idx % len(cmd_cols)]
-                    with col:
-                        info = registry.get_command_info(cmd_name)
-                        n_chapters = len(info["chapters"]) if info else 1
-                        badge = "📌" if n_chapters == 1 else f"🔄 ×{n_chapters}"
-                        st.markdown(f"`{cmd_name}` {badge}")
+                # Display as a compact list with short descriptions
+                for cmd_name in cmds:
+                    info = registry.get_command_info(cmd_name)
+                    n_chapters = len(info["chapters"]) if info else 1
+                    badge = "📌" if n_chapters == 1 else f"🔄 ×{n_chapters}"
+                    desc = CommandExtractor.get_description(cmd_name)
+                    desc_part = f" — {desc}" if desc else ""
+                    st.markdown(f"`{cmd_name}` {badge}{desc_part}")
     else:
         st.info(
             "No commands tracked yet. Use **Extract Commands (Regex)** or "

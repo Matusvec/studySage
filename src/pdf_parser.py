@@ -2,6 +2,7 @@
 PDF Parser Module
 Handles PDF loading, TOC extraction, and text extraction by page range.
 Uses PyMuPDF (fitz) for fast and reliable parsing.
+Enhanced with pymupdf_layout for improved page layout analysis.
 """
 
 import fitz  # PyMuPDF
@@ -10,6 +11,15 @@ import os
 import io
 import json
 from typing import Optional
+
+# Activate layout analysis engine (must happen before pymupdf4llm import)
+try:
+    import pymupdf.layout
+    pymupdf.layout.activate()
+    import pymupdf4llm
+    _LAYOUT_AVAILABLE = True
+except ImportError:
+    _LAYOUT_AVAILABLE = False
 
 
 class PDFParser:
@@ -107,10 +117,42 @@ class PDFParser:
     def extract_text(self, start_page: int, end_page: int) -> str:
         """
         Extract text from a range of pages (0-based, inclusive).
+        Uses pymupdf_layout for structured markdown if available,
+        falls back to plain text extraction otherwise.
         """
         start_page = max(0, start_page)
         end_page = min(end_page, self.total_pages - 1)
 
+        if _LAYOUT_AVAILABLE:
+            try:
+                pages = list(range(start_page, end_page + 1))
+                md = pymupdf4llm.to_markdown(
+                    self.doc,
+                    pages=pages,
+                    ignore_images=True,
+                    force_text=True,
+                )
+                # Clean up: strip excessive blank lines
+                md = re.sub(r'\n{4,}', '\n\n\n', md)
+                return md.strip()
+            except Exception:
+                pass  # Fall through to basic extraction
+
+        # Fallback: plain text
+        text = ""
+        for page_num in range(start_page, end_page + 1):
+            page = self.doc[page_num]
+            text += page.get_text("text") + "\n\n"
+        return text.strip()
+
+    def extract_text_plain(self, start_page: int, end_page: int) -> str:
+        """
+        Extract plain text (no layout analysis) from a range of pages.
+        Always uses basic PyMuPDF extraction. Useful for command extraction
+        and other pattern-matching tasks.
+        """
+        start_page = max(0, start_page)
+        end_page = min(end_page, self.total_pages - 1)
         text = ""
         for page_num in range(start_page, end_page + 1):
             page = self.doc[page_num]
@@ -445,7 +487,121 @@ class PDFParser:
 
     def extract_sections(self, start_page: int, end_page: int) -> list[dict]:
         """
-        Detect sub-sections within a page range by analyzing font sizes.
+        Detect sub-sections within a page range.
+        Uses pymupdf_layout page_boxes for semantic detection if available,
+        falls back to font-size heuristics otherwise.
+
+        Returns list of dicts:
+        [{"title": "Section Title", "text": "section body text...", "page": 5}, ...]
+        """
+        start_page = max(0, start_page)
+        end_page = min(end_page, self.total_pages - 1)
+
+        # Try layout-enhanced section detection first
+        if _LAYOUT_AVAILABLE:
+            try:
+                return self._extract_sections_layout(start_page, end_page)
+            except Exception:
+                pass  # Fall through to heuristic method
+
+        return self._extract_sections_heuristic(start_page, end_page)
+
+    def _extract_sections_layout(self, start_page: int, end_page: int) -> list[dict]:
+        """
+        Extract sections using pymupdf_layout's page_chunks with semantic
+        page_boxes (title, heading, text, table, list-item, etc.).
+        """
+        pages = list(range(start_page, end_page + 1))
+        chunks = pymupdf4llm.to_markdown(
+            self.doc,
+            pages=pages,
+            page_chunks=True,
+            ignore_images=True,
+            force_text=True,
+        )
+
+        # Merge all page texts and track heading positions
+        full_md = ""
+        heading_positions = []  # (char_offset, title_text, page_num)
+
+        for chunk in chunks:
+            page_num = chunk.get("metadata", {}).get("page_number", start_page)
+            page_text = chunk.get("text", "")
+            offset = len(full_md)
+
+            # Scan page_boxes for heading-class elements
+            boxes = chunk.get("page_boxes", [])
+            for box in boxes:
+                cls = box.get("class", "")
+                if cls in ("title", "heading", "section-header"):
+                    # Find this heading in the page text by position range
+                    pos_start = box.get("pos", (0, 0))
+                    text_slice = page_text[pos_start[0]:pos_start[1]].strip()
+                    # Clean markdown formatting for the title
+                    title = re.sub(r'[*#_`]+', '', text_slice).strip()
+                    title = title.split('\n')[0].strip()  # First line only
+                    if title and len(title) < 150:
+                        heading_positions.append((offset + pos_start[0], title, page_num))
+
+            full_md += page_text
+
+        # Also detect markdown headings (## or **BOLD** at line start)
+        for match in re.finditer(r'^#{1,4}\s+(.+)$', full_md, re.MULTILINE):
+            title = match.group(1).strip()
+            title = re.sub(r'[*_`]+', '', title).strip()
+            if title and len(title) < 150:
+                # Only add if not already near an existing heading
+                pos = match.start()
+                if not any(abs(pos - hp[0]) < 50 for hp in heading_positions):
+                    # Guess page from position ratio
+                    page_guess = start_page + int((pos / max(len(full_md), 1)) * (end_page - start_page + 1))
+                    heading_positions.append((pos, title, page_guess))
+
+        heading_positions.sort(key=lambda x: x[0])
+
+        # If not enough headings found, fall back to heuristic
+        if len(heading_positions) < 2:
+            return self._extract_sections_heuristic(start_page, end_page)
+
+        # Build sections from heading positions
+        sections = []
+
+        # Intro section (text before first heading)
+        if heading_positions[0][0] > 100:
+            intro = full_md[:heading_positions[0][0]].strip()
+            if len(intro) > 50:
+                sections.append({
+                    "title": "Introduction",
+                    "text": intro,
+                    "page": start_page,
+                })
+
+        for i, (pos, title, page) in enumerate(heading_positions):
+            if i + 1 < len(heading_positions):
+                end_pos = heading_positions[i + 1][0]
+            else:
+                end_pos = len(full_md)
+
+            body = full_md[pos:end_pos].strip()
+            # Remove the heading line itself from the body
+            body_lines = body.split('\n', 1)
+            body = body_lines[1].strip() if len(body_lines) > 1 else body
+
+            if len(body) > 50:
+                sections.append({
+                    "title": title,
+                    "text": body,
+                    "page": page,
+                })
+
+        if not sections:
+            return self._extract_sections_heuristic(start_page, end_page)
+
+        return sections
+
+    def _extract_sections_heuristic(self, start_page: int, end_page: int) -> list[dict]:
+        """
+        Detect sub-sections by analyzing font sizes (fallback heuristic).
         Headings are identified as lines with larger-than-body font size
         and short length (< 120 chars).
 
