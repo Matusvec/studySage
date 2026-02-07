@@ -4,6 +4,7 @@ Exports chapter summaries to formatted PDF files using fpdf2.
 """
 
 import re
+import io
 from fpdf import FPDF
 
 
@@ -17,9 +18,12 @@ class SummaryPDFExporter:
         summary_text: str,
         depth_label: str = "",
         book_title: str = "",
+        media_items: list[dict] | None = None,
+        chapter_start_page: int = 0,
+        chapter_end_page: int = 0,
     ) -> bytes:
         """
-        Export a summary to PDF bytes.
+        Export a summary to PDF bytes with inline images/tables.
 
         Args:
             chapter_title: Title of the chapter
@@ -27,6 +31,10 @@ class SummaryPDFExporter:
             summary_text: The markdown summary text
             depth_label: The depth level label (e.g., "Standard")
             book_title: Optional book title
+            media_items: Optional list of media dicts with keys:
+                         {type, bytes, description, page, label}
+            chapter_start_page: Chapter start page (0-based)
+            chapter_end_page: Chapter end page (0-based)
 
         Returns:
             PDF file as bytes
@@ -59,8 +67,14 @@ class SummaryPDFExporter:
         pdf.line(pdf.l_margin, pdf.get_y(), pdf.w - pdf.r_margin, pdf.get_y())
         pdf.ln(6)
 
-        # ── Render Markdown Content ──
-        self._render_markdown(pdf, summary_text)
+        # ── Render content with inline media ──
+        if media_items:
+            self._render_with_inline_media(
+                pdf, summary_text, media_items,
+                chapter_start_page, chapter_end_page,
+            )
+        else:
+            self._render_markdown(pdf, summary_text)
 
         # ── Footer ──
         pdf.ln(10)
@@ -113,6 +127,83 @@ class SummaryPDFExporter:
 
         # Final fallback — encode to latin-1, replacing anything unknown
         return cleaned.encode("latin-1", errors="replace").decode("latin-1")
+
+    def _render_with_inline_media(
+        self,
+        pdf: FPDF,
+        summary_text: str,
+        media_items: list[dict],
+        chapter_start_page: int = 0,
+        chapter_end_page: int = 0,
+    ):
+        """
+        Render summary markdown with media items interleaved at their
+        correct positions based on page numbers.
+        """
+        # Split summary into sections by ## headings
+        sections = re.split(r'(?=^## )', summary_text, flags=re.MULTILINE)
+        sections = [s for s in sections if s.strip()]
+        n_sections = max(len(sections), 1)
+
+        ch_span = max(chapter_end_page - chapter_start_page, 1)
+
+        # Map each media item to a section index
+        media_by_section: dict[int, list[dict]] = {}
+        for media in media_items:
+            page_offset = media.get("page", chapter_start_page) - chapter_start_page
+            section_idx = min(int((page_offset / ch_span) * n_sections), n_sections - 1)
+            section_idx = max(0, section_idx)
+            media_by_section.setdefault(section_idx, []).append(media)
+
+        # Render each section followed by its media
+        for s_idx, section_md in enumerate(sections):
+            self._render_markdown(pdf, section_md)
+
+            if s_idx in media_by_section:
+                for media in media_by_section[s_idx]:
+                    self._render_inline_media_item(pdf, media)
+
+    def _render_inline_media_item(self, pdf: FPDF, media: dict):
+        """Render a single media item (image or table) inline in the PDF."""
+        pdf.ln(4)
+
+        # Light border box
+        pdf.set_draw_color(200, 200, 200)
+        pdf.set_fill_color(250, 250, 250)
+
+        # Label
+        icon = "Table" if media.get("type") == "table" else "Figure"
+        label = self._clean(media.get("label", icon))
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.set_text_color(80, 80, 80)
+        pdf.cell(0, 5, f"{icon}: {label}", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
+
+        # Embed the image — centered, moderate size (max 120mm width)
+        try:
+            img_stream = io.BytesIO(media["bytes"])
+            content_width = pdf.w - pdf.l_margin - pdf.r_margin
+            img_width = min(content_width * 0.7, 120)  # ~70% width or 120mm
+            x_offset = pdf.l_margin + (content_width - img_width) / 2
+            pdf.image(img_stream, x=x_offset, w=img_width, h=0)
+        except Exception:
+            pdf.set_font("Helvetica", "I", 9)
+            pdf.set_text_color(150, 50, 50)
+            pdf.cell(0, 5, "[Image could not be embedded]", new_x="LMARGIN", new_y="NEXT")
+
+        pdf.ln(2)
+
+        # Description
+        description = media.get("description", "")
+        if description:
+            pdf.set_font("Helvetica", "I", 9)
+            pdf.set_text_color(80, 80, 80)
+            cleaned_desc = self._clean(description)
+            cleaned_desc = re.sub(r'\*\*(.*?)\*\*', r'\1', cleaned_desc)
+            cleaned_desc = re.sub(r'`([^`]+)`', r'\1', cleaned_desc)
+            pdf.multi_cell(0, 4.5, cleaned_desc)
+
+        pdf.ln(5)
 
     # ── Markdown Renderer ────────────────────────────────────────────────────
 

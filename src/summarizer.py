@@ -1,12 +1,14 @@
 """
 Summarizer Module
 Handles AI-powered summarization using Google Gemini API.
-Supports adjustable summary depth levels.
+Supports adjustable summary depth levels with content categorization.
 """
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import time
 from enum import Enum
+from src.category_parser import get_category_tags_prompt
 
 
 class SummaryDepth(Enum):
@@ -55,19 +57,19 @@ class GeminiSummarizer:
             api_key: Google Gemini API key
             model_name: Gemini model to use (default: gemini-2.5-flash)
         """
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel(model_name)
+        self.client = genai.Client(api_key=api_key)
         self.model_name = model_name
         self.max_retries = 3
         self.retry_base_delay = 40  # seconds — matches Gemini's suggested retry
 
-    def _call_with_retry(self, generation_config, prompt_parts) -> str:
+    def _call_with_retry(self, config, contents) -> str:
         """Call Gemini API with automatic retry on rate limit (429) errors."""
         for attempt in range(self.max_retries):
             try:
-                response = self.model.generate_content(
-                    prompt_parts,
-                    generation_config=generation_config,
+                response = self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=contents,
+                    config=config,
                 )
                 return response.text
             except Exception as e:
@@ -93,7 +95,8 @@ class GeminiSummarizer:
         text: str,
         chapter_title: str = "",
         depth: SummaryDepth = SummaryDepth.STANDARD,
-        custom_instructions: str = ""
+        custom_instructions: str = "",
+        categorize: bool = True,
     ) -> str:
         """
         Summarize text with the specified depth level.
@@ -103,11 +106,16 @@ class GeminiSummarizer:
             chapter_title: Optional chapter title for context
             depth: How detailed the summary should be
             custom_instructions: Any additional user instructions
+            categorize: Whether to include category tags in headings
 
         Returns:
             Formatted summary string
         """
         depth_instruction = DEPTH_PROMPTS[depth]
+
+        category_instruction = ""
+        if categorize:
+            category_instruction = "\n\n" + get_category_tags_prompt()
 
         system_prompt = (
             "You are StudySage, an expert study assistant. Your job is to create "
@@ -119,6 +127,7 @@ class GeminiSummarizer:
             "- **Bold** for key terms and commands\n"
             "- `code formatting` for commands, syntax, file paths\n"
             "- Numbered lists for sequential steps or processes\n"
+            + category_instruction
         )
 
         user_prompt = f"{depth_instruction}\n\n"
@@ -132,11 +141,11 @@ class GeminiSummarizer:
         user_prompt += f"Text to summarize:\n\n{text}"
 
         return self._call_with_retry(
-            generation_config=genai.GenerationConfig(
+            config=types.GenerateContentConfig(
                 temperature=0.3,
                 max_output_tokens=65536,
             ),
-            prompt_parts=[{"role": "user", "parts": [system_prompt + "\n\n" + user_prompt]}],
+            contents=system_prompt + "\n\n" + user_prompt,
         )
 
     def ask_question(self, text: str, question: str, chapter_title: str = "") -> str:
@@ -166,11 +175,157 @@ class GeminiSummarizer:
         user_prompt += f"Question: {question}"
 
         return self._call_with_retry(
-            generation_config=genai.GenerationConfig(
+            config=types.GenerateContentConfig(
                 temperature=0.2,
                 max_output_tokens=4096,
             ),
-            prompt_parts=[{"role": "user", "parts": [system_prompt + "\n\n" + user_prompt]}],
+            contents=system_prompt + "\n\n" + user_prompt,
+        )
+
+    def describe_image(
+        self,
+        image_bytes: bytes,
+        chapter_title: str = "",
+        mime_type: str = "image/png",
+    ) -> str:
+        """
+        Describe an image from the PDF using Gemini Vision.
+
+        Args:
+            image_bytes: Raw image bytes (PNG)
+            chapter_title: Chapter context
+            mime_type: Image MIME type
+
+        Returns:
+            AI-generated description of the image
+        """
+        system_prompt = (
+            "You are StudySage, an expert study assistant. Analyze this image from "
+            "a textbook and provide a clear, concise description that helps a student "
+            "understand what the image shows.\n\n"
+            "Include:\n"
+            "- What the image depicts (diagram, chart, screenshot, illustration, etc.)\n"
+            "- Key information or data shown\n"
+            "- How it relates to the chapter content\n"
+            "- Any labels, legends, or annotations\n\n"
+            "Keep the description to 2-4 sentences. Use Markdown formatting."
+        )
+
+        context = ""
+        if chapter_title:
+            context = f"This image is from the chapter: **{chapter_title}**\n\n"
+
+        prompt_text = system_prompt + "\n\n" + context + "Describe this image:"
+
+        return self._call_with_retry(
+            config=types.GenerateContentConfig(
+                temperature=0.2,
+                max_output_tokens=1024,
+            ),
+            contents=[
+                prompt_text,
+                types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+            ],
+        )
+
+    def describe_table(
+        self,
+        table_image_bytes: bytes,
+        table_text: str = "",
+        chapter_title: str = "",
+        mime_type: str = "image/png",
+    ) -> str:
+        """
+        Describe/summarize a table from the PDF using Gemini Vision.
+
+        Args:
+            table_image_bytes: Table rendered as PNG bytes
+            table_text: Raw text extraction of the table (for additional context)
+            chapter_title: Chapter context
+            mime_type: Image MIME type
+
+        Returns:
+            AI-generated summary of the table
+        """
+        system_prompt = (
+            "You are StudySage, an expert study assistant. Analyze this table from "
+            "a textbook and provide a clear summary that helps a student understand "
+            "the key information.\n\n"
+            "Include:\n"
+            "- What the table is about (its purpose)\n"
+            "- Key data points, comparisons, or relationships shown\n"
+            "- Any important patterns or takeaways\n\n"
+            "Keep it concise but informative (3-5 sentences). Use Markdown formatting."
+        )
+
+        context = ""
+        if chapter_title:
+            context += f"This table is from the chapter: **{chapter_title}**\n\n"
+        if table_text:
+            context += f"Raw table text (for reference):\n```\n{table_text[:2000]}\n```\n\n"
+
+        prompt_text = system_prompt + "\n\n" + context + "Summarize this table:"
+
+        return self._call_with_retry(
+            config=types.GenerateContentConfig(
+                temperature=0.2,
+                max_output_tokens=1024,
+            ),
+            contents=[
+                prompt_text,
+                types.Part.from_bytes(data=table_image_bytes, mime_type=mime_type),
+            ],
+        )
+
+    def summarize_man_page(self, command: str, man_text: str) -> str:
+        """
+        Summarize a man page into a clear, simple reference.
+
+        Args:
+            command: The command name
+            man_text: Raw man page text
+
+        Returns:
+            Formatted summary with description, usage, and flags
+        """
+        system_prompt = (
+            "You are StudySage, an expert Linux/Unix study assistant. "
+            "A student is learning about commands from a textbook and wants to "
+            "understand this command clearly.\n\n"
+            "Summarize this man page into a SIMPLE, CLEAR reference card. "
+            "The original man page is often overly technical and intimidating — "
+            "your job is to make it approachable.\n\n"
+            "Format your response EXACTLY like this:\n\n"
+            "## `command` — One-Line Description\n\n"
+            "**What it does:** 1-2 sentence plain-English explanation.\n\n"
+            "**Basic usage:**\n"
+            "```\ncommand [common usage pattern]\n```\n\n"
+            "**Most useful flags:**\n"
+            "| Flag | What it does |\n"
+            "|------|-------------|\n"
+            "| `-x` | Simple explanation |\n\n"
+            "**Common examples:**\n"
+            "```bash\n# Example with explanation\ncommand -flags args\n```\n\n"
+            "**Pro tip:** One helpful tip for beginners.\n\n"
+            "Rules:\n"
+            "- Keep explanations simple — imagine explaining to someone who just started learning Linux\n"
+            "- Only include the 8-12 most useful/common flags, not all of them\n"
+            "- Give 3-5 real-world examples\n"
+            "- If a flag is rarely used or very advanced, skip it\n"
+            "- Use plain English, avoid jargon where possible\n"
+        )
+
+        user_prompt = (
+            f"Summarize this man page for the `{command}` command:\n\n"
+            f"{man_text}"
+        )
+
+        return self._call_with_retry(
+            config=types.GenerateContentConfig(
+                temperature=0.2,
+                max_output_tokens=4096,
+            ),
+            contents=system_prompt + "\n\n" + user_prompt,
         )
 
     def extract_key_items(self, text: str, item_type: str = "commands", chapter_title: str = "") -> str:
@@ -227,11 +382,11 @@ class GeminiSummarizer:
         user_prompt += f"{prompt}\n\nText:\n{text}"
 
         return self._call_with_retry(
-            generation_config=genai.GenerationConfig(
+            config=types.GenerateContentConfig(
                 temperature=0.1,
                 max_output_tokens=65536,
             ),
-            prompt_parts=[{"role": "user", "parts": [system_prompt + "\n\n" + user_prompt]}],
+            contents=system_prompt + "\n\n" + user_prompt,
         )
 
     def summarize_long_text(
@@ -239,13 +394,14 @@ class GeminiSummarizer:
         chunks: list[str],
         chapter_title: str = "",
         depth: SummaryDepth = SummaryDepth.STANDARD,
+        categorize: bool = True,
     ) -> str:
         """
         Summarize text that's been split into chunks.
         Summarizes each chunk, then combines into a final summary.
         """
         if len(chunks) == 1:
-            return self.summarize(chunks[0], chapter_title, depth)
+            return self.summarize(chunks[0], chapter_title, depth, categorize=categorize)
 
         chunk_summaries = []
         for i, chunk in enumerate(chunks):
@@ -253,6 +409,7 @@ class GeminiSummarizer:
                 chunk,
                 chapter_title=f"{chapter_title} (Part {i+1}/{len(chunks)})" if chapter_title else f"Part {i+1}/{len(chunks)}",
                 depth=depth,
+                categorize=False,  # Don't tag individual chunks
             )
             chunk_summaries.append(summary)
 
@@ -265,7 +422,7 @@ class GeminiSummarizer:
             f"{depth.value} depth level.\n\n{combined_text}"
         )
 
-        return self.summarize(combine_prompt, chapter_title, depth)
+        return self.summarize(combine_prompt, chapter_title, depth, categorize=categorize)
 
     def summarize_by_sections(
         self,
@@ -274,6 +431,7 @@ class GeminiSummarizer:
         depth: SummaryDepth = SummaryDepth.STANDARD,
         custom_instructions: str = "",
         progress_callback=None,
+        categorize: bool = True,
     ) -> str:
         """
         Summarize a chapter by its detected sub-sections, then combine.
@@ -290,13 +448,15 @@ class GeminiSummarizer:
             depth: Summary depth level
             custom_instructions: Any additional user instructions
             progress_callback: Optional callable(current, total, section_title)
+            categorize: Whether to include category tags in headings
 
         Returns:
             Combined summary string
         """
         if len(sections) == 1:
             return self.summarize(
-                sections[0]["text"], chapter_title, depth, custom_instructions
+                sections[0]["text"], chapter_title, depth, custom_instructions,
+                categorize=categorize,
             )
 
         # Phase 1: Summarize each section individually
@@ -316,6 +476,7 @@ class GeminiSummarizer:
                 chapter_title=f"{chapter_title} → {section['title']}",
                 depth=depth,
                 custom_instructions=custom_instructions,
+                categorize=False,  # Don't tag individual sections
             )
             section_summaries.append({
                 "title": section["title"],
@@ -333,6 +494,10 @@ class GeminiSummarizer:
 
         depth_instruction = DEPTH_PROMPTS[depth]
 
+        category_instruction = ""
+        if categorize:
+            category_instruction = "\n" + get_category_tags_prompt()
+
         combine_system = (
             "You are StudySage, an expert study assistant. You are given summaries "
             "of individual sections from a single book chapter. Your job is to "
@@ -343,6 +508,7 @@ class GeminiSummarizer:
             "- Add a brief chapter overview at the top (2-3 sentences)\n"
             "- Maintain all key details — don't lose information in the merge\n"
             "- Format in clean Markdown with headings, bullets, bold, and code formatting\n"
+            + category_instruction
         )
 
         combine_user = (
@@ -356,9 +522,9 @@ class GeminiSummarizer:
             combine_user += f"\n\nAdditional instructions: {custom_instructions}"
 
         return self._call_with_retry(
-            generation_config=genai.GenerationConfig(
+            config=types.GenerateContentConfig(
                 temperature=0.3,
                 max_output_tokens=65536,
             ),
-            prompt_parts=[{"role": "user", "parts": [combine_system + "\n\n" + combine_user]}],
+            contents=combine_system + "\n\n" + combine_user,
         )

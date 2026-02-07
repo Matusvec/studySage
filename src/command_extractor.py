@@ -2,10 +2,12 @@
 Command Extractor Module
 Extracts Linux commands, flags, syntax from chapter text using
 regex patterns and font analysis (monospace detection).
+Includes CommandRegistry for tracking commands across chapters.
 """
 
 import re
 from dataclasses import dataclass, field
+from collections import OrderedDict
 
 
 @dataclass
@@ -19,6 +21,101 @@ class ExtractedCommand:
     def __str__(self):
         flags_str = ", ".join(self.flags) if self.flags else "none"
         return f"`{self.command}` (flags: {flags_str})"
+
+
+class CommandRegistry:
+    """
+    Tracks which commands were first introduced in which chapter.
+    Maintains a running index across all processed chapters.
+    """
+
+    def __init__(self):
+        # command_name -> {"first_chapter_idx": int, "first_chapter_title": str,
+        #                  "chapters": [int], "flags_by_chapter": {idx: [flags]}}
+        self._registry: dict[str, dict] = {}
+        # chapter_idx -> [command_names first introduced in this chapter]
+        self._introduced_in: dict[int, list[str]] = {}
+
+    def register_commands(
+        self,
+        commands: list[ExtractedCommand],
+        chapter_idx: int,
+        chapter_title: str,
+    ):
+        """Register extracted commands from a chapter."""
+        for cmd in commands:
+            name = cmd.command
+            if name not in self._registry:
+                # First time seeing this command
+                self._registry[name] = {
+                    "first_chapter_idx": chapter_idx,
+                    "first_chapter_title": chapter_title,
+                    "chapters": [chapter_idx],
+                    "flags_by_chapter": {chapter_idx: cmd.flags},
+                }
+                self._introduced_in.setdefault(chapter_idx, []).append(name)
+            else:
+                entry = self._registry[name]
+                if chapter_idx not in entry["chapters"]:
+                    entry["chapters"].append(chapter_idx)
+                # Merge new flags
+                existing = set(entry["flags_by_chapter"].get(chapter_idx, []))
+                existing.update(cmd.flags)
+                entry["flags_by_chapter"][chapter_idx] = list(existing)
+
+    def get_new_commands(self, chapter_idx: int) -> list[str]:
+        """Get commands first introduced in a specific chapter."""
+        return sorted(self._introduced_in.get(chapter_idx, []))
+
+    def get_all_commands_by_chapter(self) -> dict[int, list[str]]:
+        """Get all commands grouped by the chapter they were introduced in."""
+        result = {}
+        for ch_idx in sorted(self._introduced_in.keys()):
+            result[ch_idx] = sorted(self._introduced_in[ch_idx])
+        return result
+
+    def get_command_info(self, command: str) -> dict | None:
+        """Get tracking info for a specific command."""
+        return self._registry.get(command)
+
+    def get_all_commands(self) -> list[str]:
+        """Get all registered command names sorted."""
+        return sorted(self._registry.keys())
+
+    def get_running_index(self, up_to_chapter: int, chapters: list[dict]) -> list[dict]:
+        """
+        Get a running index of commands up to and including the given chapter.
+        Returns list of dicts: {chapter_idx, chapter_title, commands: [str]}
+        """
+        result = []
+        for ch_idx in sorted(self._introduced_in.keys()):
+            if ch_idx > up_to_chapter:
+                break
+            title = chapters[ch_idx]["title"] if ch_idx < len(chapters) else f"Chapter {ch_idx + 1}"
+            cmds = sorted(self._introduced_in[ch_idx])
+            if cmds:
+                result.append({
+                    "chapter_idx": ch_idx,
+                    "chapter_title": title,
+                    "commands": cmds,
+                    "is_current": ch_idx == up_to_chapter,
+                })
+        return result
+
+    def to_dict(self) -> dict:
+        """Serialize for caching."""
+        return {
+            "registry": self._registry,
+            "introduced_in": {str(k): v for k, v in self._introduced_in.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CommandRegistry":
+        """Deserialize from cache."""
+        obj = cls()
+        obj._registry = data.get("registry", {})
+        obj._introduced_in = {int(k): v for k, v in data.get("introduced_in", {}).items()}
+        return obj
 
 
 class CommandExtractor:
@@ -135,6 +232,9 @@ class CommandExtractor:
         """
         Extract commands using text block info (with font analysis).
         Monospace fonts strongly indicate commands/code.
+
+        Improved: handles multi-line mono text, shell prompts,
+        and tries multiple strategies to find commands in code-formatted text.
         """
         commands = []
         seen = set()
@@ -142,23 +242,69 @@ class CommandExtractor:
         for block in blocks:
             text = block["text"]
             is_mono = block.get("is_mono", False)
+            page = block.get("page", -1)
 
             if is_mono:
-                # Monospace text — likely a command or code
-                cmd = self._parse_command_string(text)
-                if cmd and cmd.command not in seen:
-                    cmd.page = block.get("page", -1)
-                    seen.add(cmd.command)
-                    commands.append(cmd)
+                # Strategy 1: Try to parse each line as a command
+                for line in text.split('\n'):
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    # Strip shell prompts
+                    for prefix in ['$ ', '# ', '% ', '> ']:
+                        if line.startswith(prefix):
+                            line = line[len(prefix):]
+                            break
+
+                    # Try parsing the line as a command
+                    cmd = self._parse_command_string(line)
+                    if cmd and cmd.command not in seen:
+                        cmd.page = page
+                        seen.add(cmd.command)
+                        commands.append(cmd)
+                        continue
+
+                    # Strategy 2: Check if any known command appears in this line
+                    words = re.findall(r'\b[a-zA-Z_][\w.-]*\b', line)
+                    for word in words:
+                        if word in self.KNOWN_COMMANDS and word not in seen:
+                            # Extract flags from the rest of the line
+                            flags = self.FLAG_PATTERN.findall(line)
+                            flags = [f for f in flags if len(f) <= 20]
+                            commands.append(ExtractedCommand(
+                                command=word,
+                                flags=flags[:10],
+                                context=line[:120],
+                                page=page,
+                            ))
+                            seen.add(word)
+
+                # Strategy 3: Even single-word mono text might be a command
+                stripped = text.strip()
+                if ' ' not in stripped and stripped in self.KNOWN_COMMANDS and stripped not in seen:
+                    commands.append(ExtractedCommand(command=stripped, page=page))
+                    seen.add(stripped)
+
             else:
-                # Check for inline command references
+                # Non-mono text: check for inline backtick commands
                 backtick_cmds = re.findall(r'`([^`]+)`', text)
                 for cmd_text in backtick_cmds:
                     cmd = self._parse_command_string(cmd_text)
                     if cmd and cmd.command not in seen:
-                        cmd.page = block.get("page", -1)
+                        cmd.page = page
                         seen.add(cmd.command)
                         commands.append(cmd)
+
+                    # Also check for known commands inside backticks
+                    if not cmd:
+                        for word in cmd_text.split():
+                            clean = word.strip('`').split('/').pop()
+                            if clean in self.KNOWN_COMMANDS and clean not in seen:
+                                commands.append(ExtractedCommand(
+                                    command=clean, page=page, context=cmd_text[:80]
+                                ))
+                                seen.add(clean)
 
         return sorted(commands, key=lambda c: c.command)
 

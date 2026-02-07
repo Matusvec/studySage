@@ -1,21 +1,26 @@
 """
 Chapter Manager Module
 Handles chapter state: saving, loading, verification status,
-and caching extracted text per chapter.
+caching extracted text per chapter, and the book library.
 """
 
 import json
 import os
+import shutil
 import hashlib
+from datetime import datetime
 from typing import Optional
 
 
 CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".cache")
+BOOKS_DIR = os.path.join(CACHE_DIR, "books")
+LIBRARY_FILE = os.path.join(CACHE_DIR, "library.json")
 
 
 def _ensure_cache_dir():
     """Create cache directory if it doesn't exist."""
     os.makedirs(CACHE_DIR, exist_ok=True)
+    os.makedirs(BOOKS_DIR, exist_ok=True)
 
 
 def _get_book_id(filename: str) -> str:
@@ -190,6 +195,45 @@ def clear_cache(filename: Optional[str] = None):
                 os.remove(filepath)
 
 
+def save_command_registry(filename: str, registry_data: dict) -> str:
+    """
+    Save the command registry to a JSON file for a specific book.
+
+    Args:
+        filename: Original PDF filename
+        registry_data: Output of CommandRegistry.to_dict()
+
+    Returns:
+        Path to the saved file
+    """
+    _ensure_cache_dir()
+    book_id = _get_book_id(filename)
+    path = os.path.join(CACHE_DIR, f"{book_id}_commands.json")
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(registry_data, f, indent=2, ensure_ascii=False)
+
+    return path
+
+
+def load_command_registry(filename: str) -> Optional[dict]:
+    """
+    Load a previously saved command registry.
+
+    Returns:
+        Registry dict (pass to CommandRegistry.from_dict), or None
+    """
+    _ensure_cache_dir()
+    book_id = _get_book_id(filename)
+    path = os.path.join(CACHE_DIR, f"{book_id}_commands.json")
+
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    return None
+
+
 def get_all_books() -> list[dict]:
     """
     List all books that have cached chapter data.
@@ -211,3 +255,143 @@ def get_all_books() -> list[dict]:
                 })
 
     return books
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Book Library — persistent book history with covers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _load_library() -> dict:
+    """Load the library index file."""
+    _ensure_cache_dir()
+    if os.path.exists(LIBRARY_FILE):
+        with open(LIBRARY_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"books": {}}
+
+
+def _save_library(library: dict):
+    """Save the library index file."""
+    _ensure_cache_dir()
+    with open(LIBRARY_FILE, "w", encoding="utf-8") as f:
+        json.dump(library, f, indent=2, ensure_ascii=False)
+
+
+def save_book_to_library(
+    filename: str,
+    pdf_source_path: str,
+    title: str = "",
+    author: str = "",
+    total_pages: int = 0,
+    num_chapters: int = 0,
+    cover_png_bytes: bytes | None = None,
+) -> str:
+    """
+    Save a book to the persistent library.
+
+    - Copies the PDF to .cache/books/ for permanent storage
+    - Saves cover thumbnail as PNG
+    - Updates library index
+
+    Args:
+        filename: Original PDF filename
+        pdf_source_path: Current path to the PDF (temp or original)
+        title: Book title from metadata
+        author: Author from metadata
+        total_pages: Number of pages
+        num_chapters: Number of detected chapters
+        cover_png_bytes: First-page PNG thumbnail (optional)
+
+    Returns:
+        The permanent path to the stored PDF
+    """
+    _ensure_cache_dir()
+    book_id = _get_book_id(filename)
+
+    # Copy PDF to permanent storage
+    pdf_dest = os.path.join(BOOKS_DIR, f"{book_id}.pdf")
+    if not os.path.exists(pdf_dest):
+        shutil.copy2(pdf_source_path, pdf_dest)
+
+    # Save cover thumbnail
+    cover_path = os.path.join(BOOKS_DIR, f"{book_id}_cover.png")
+    if cover_png_bytes and not os.path.exists(cover_path):
+        with open(cover_path, "wb") as f:
+            f.write(cover_png_bytes)
+
+    # Update library index
+    library = _load_library()
+    library["books"][book_id] = {
+        "filename": filename,
+        "title": title or filename,
+        "author": author,
+        "total_pages": total_pages,
+        "num_chapters": num_chapters,
+        "pdf_path": pdf_dest,
+        "cover_path": cover_path if cover_png_bytes else "",
+        "last_opened": datetime.now().isoformat(),
+        "added": library.get("books", {}).get(book_id, {}).get(
+            "added", datetime.now().isoformat()
+        ),
+    }
+    _save_library(library)
+    return pdf_dest
+
+
+def update_library_last_opened(filename: str):
+    """Update the last_opened timestamp for a book."""
+    book_id = _get_book_id(filename)
+    library = _load_library()
+    if book_id in library.get("books", {}):
+        library["books"][book_id]["last_opened"] = datetime.now().isoformat()
+        _save_library(library)
+
+
+def get_library_books() -> list[dict]:
+    """
+    Get all books in the library, sorted by last opened (most recent first).
+
+    Returns:
+        List of book dicts with: filename, title, author, total_pages,
+        num_chapters, pdf_path, cover_path, last_opened, added, book_id
+    """
+    library = _load_library()
+    books = []
+    for book_id, info in library.get("books", {}).items():
+        # Only include books whose PDF still exists
+        if os.path.exists(info.get("pdf_path", "")):
+            entry = {**info, "book_id": book_id}
+            books.append(entry)
+
+    # Sort by last_opened descending
+    books.sort(key=lambda b: b.get("last_opened", ""), reverse=True)
+    return books
+
+
+def get_book_cover(filename: str) -> bytes | None:
+    """Load the cover thumbnail PNG for a book."""
+    book_id = _get_book_id(filename)
+    cover_path = os.path.join(BOOKS_DIR, f"{book_id}_cover.png")
+    if os.path.exists(cover_path):
+        with open(cover_path, "rb") as f:
+            return f.read()
+    return None
+
+
+def remove_book_from_library(filename: str):
+    """Remove a book and all its cached data from the library."""
+    book_id = _get_book_id(filename)
+
+    # Remove from library index
+    library = _load_library()
+    library.get("books", {}).pop(book_id, None)
+    _save_library(library)
+
+    # Remove PDF and cover
+    for ext in [".pdf", "_cover.png"]:
+        path = os.path.join(BOOKS_DIR, f"{book_id}{ext}")
+        if os.path.exists(path):
+            os.remove(path)
+
+    # Remove all cache files for this book
+    clear_cache(filename)
